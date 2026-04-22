@@ -23,9 +23,14 @@
         <env name="BCRYPT_ROUNDS" value="4"/>
         <env name="BROADCAST_CONNECTION" value="null"/>
         <env name="CACHE_STORE" value="array"/>
-        <env name="DB_CONNECTION" value="sqlite"/>
-        <env name="DB_DATABASE" value=":memory:"/>
-        <env name="DB_URL" value=""/>
+        <!-- Tests run against Postgres to match prod behaviour (JSON columns,
+             case sensitivity, date quirks). `squadup_test` is created by
+             docker/postgres/init-test-db.sql on fresh volumes; see README
+             for the one-liner to create it on an existing volume.
+             DB_HOST / DB_USERNAME / DB_PASSWORD inherit from .env (container:
+             host=postgres) or the GitHub Actions job env (host=127.0.0.1). -->
+        <env name="DB_CONNECTION" value="pgsql"/>
+        <env name="DB_DATABASE" value="squadup_test"/>
         <env name="MAIL_MAILER" value="array"/>
         <env name="QUEUE_CONNECTION" value="sync"/>
         <env name="SESSION_DRIVER" value="array"/>

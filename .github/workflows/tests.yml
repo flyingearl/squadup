@@ -1,0 +1,166 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Feature + unit tests against Postgres (matches the prod driver).
+  # Runs natively via setup-php — faster than bringing the Docker image
+  # up for each test run, and the docker-build job below proves the
+  # image is still sound.
+  pest:
+    name: Pest (against Postgres 16)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-bookworm
+        env:
+          POSTGRES_DB: squadup_test
+          POSTGRES_USER: squadup
+          POSTGRES_PASSWORD: squadup
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd=pg_isready
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=10
+
+      redis:
+        image: redis:7-bookworm
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=10
+
+    env:
+      DB_CONNECTION: pgsql
+      DB_HOST: 127.0.0.1
+      DB_PORT: '5432'
+      DB_DATABASE: squadup_test
+      DB_USERNAME: squadup
+      DB_PASSWORD: squadup
+      REDIS_HOST: 127.0.0.1
+      REDIS_PORT: '6379'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, intl, zip, bcmath, exif, opcache, pcntl, gd, pdo_pgsql, redis
+          tools: composer:v2
+          coverage: none
+
+      - name: Cache composer
+        uses: actions/cache@v4
+        with:
+          path: ~/.composer/cache
+          key: composer-${{ hashFiles('composer.lock') }}
+          restore-keys: composer-
+
+      - name: Install composer deps
+        run: composer install --no-interaction --prefer-dist --no-progress
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install npm deps
+        run: npm ci --no-audit --no-fund
+
+      # Wayfinder's vite plugin runs `php artisan wayfinder:generate` during
+      # build. We have PHP on this runner so that just works.
+      - name: Build assets
+        run: npm run build
+
+      - name: Copy env
+        run: cp .env.example .env
+
+      - name: Generate APP_KEY
+        run: php artisan key:generate --force
+
+      - name: Run Pest
+        # phpunit.xml overrides DB_CONNECTION=pgsql, DB_DATABASE=squadup_test.
+        # RefreshDatabase migrates fresh per test class; transaction rolls
+        # back each test.
+        run: php artisan test --compact
+
+  # Proves the Docker image still builds and the prod stack boots. This
+  # is the job that would have caught the bind-mount leak and stale
+  # package cache bugs before they hit main.
+  docker-build:
+    name: Docker build + prod smoke test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build the dev target first. Shared base layer feeds the prod build
+      # via the GitHub Actions cache.
+      - name: Build dev image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: dev
+          load: true
+          tags: squadup/app:dev
+          cache-from: type=gha,scope=docker-base
+          cache-to: type=gha,scope=docker-base,mode=max
+
+      - name: Build prod image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: prod
+          load: true
+          tags: squadup/app:prod
+          cache-from: type=gha,scope=docker-base
+          cache-to: type=gha,scope=docker-prod,mode=max
+
+      # Bring up the prod stack and verify the app replicas serve
+      # requests through Traefik. No Vite, no bind mounts, no dev
+      # ovalue in path — this is the "does the baked image actually
+      # work" check.
+      - name: Prepare .env
+        run: cp .env.example .env
+
+      - name: Start prod stack
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+            up -d --wait postgres redis minio minio-init mailpit traefik app
+
+      - name: Smoke test /up
+        run: |
+          # Traefik takes a moment to discover the app replicas; retry.
+          for i in {1..20}; do
+            if curl -fsS -m 5 http://localhost:8080/up > /dev/null; then
+              echo "app /up responded OK"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "app never became reachable"
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml logs app | tail -60
+          exit 1
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml down -v

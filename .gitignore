@@ -45,8 +45,5 @@ __NEEDS_ONBOARD
 # Entrypoint flock file — runtime, per-container
 /storage/.boot.lock
 
-# Starter CI workflows temporarily excluded — the shipped tests.yml targets
-# SQLite and won't work with our Docker/Postgres stack. Re-added in commit 6
-# when we rewrite CI. Re-adding them now would also need the `workflow`
-# OAuth scope added to the personal gh token.
-/.github/workflows
+# Workflows are re-enabled as of commit 6 (CI). The starter's tests.yml
+# and lint.yml were rewritten for the Docker + Postgres stack.

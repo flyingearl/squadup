@@ -47,6 +47,13 @@ mkdir -p storage
 (
     flock -x 200
 
+    # Clear any stale bootstrap caches. The bind mount means a previous
+    # prod-mode run can leave config:cache output here, which would then
+    # poison dev (e.g. APP_ENV=production, stale password rules, etc.).
+    php artisan config:clear  > /dev/null 2>&1 || true
+    php artisan route:clear   > /dev/null 2>&1 || true
+    php artisan view:clear    > /dev/null 2>&1 || true
+
     # APP_KEY: missing, blank, or malformed (more than one base64: prefix).
     APP_KEY_BASE64_COUNT=$(grep -c '^APP_KEY=base64:' .env 2>/dev/null || echo 0)
     APP_KEY_EXTRA_PREFIXES=$(grep -c 'base64:' .env 2>/dev/null || echo 0)

@@ -195,6 +195,10 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD:-squadup}
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      # Init scripts run in alphabetical order on the first-ever boot of
+      # a fresh data volume. Existing volumes skip this — see README for
+      # the one-liner to create the test DB on an already-populated volume.
+      - ./docker/postgres:/docker-entrypoint-initdb.d:ro
     ports:
       - "5432:5432"
     healthcheck:

@@ -1,5 +1,8 @@
 # SquadUp
 
+[![tests](https://github.com/flyingearl/squadup/actions/workflows/tests.yml/badge.svg)](https://github.com/flyingearl/squadup/actions/workflows/tests.yml)
+[![lint](https://github.com/flyingearl/squadup/actions/workflows/lint.yml/badge.svg)](https://github.com/flyingearl/squadup/actions/workflows/lint.yml)
+
 > **"X for gamers"** — a social platform where every user is a player profile, every post can be an LFG signal, and finding regular teammates is a first-class action rather than an afterthought in a Discord server.
 
 **Status:** Phase 0 (foundation) — infra only, no app features yet. See [the brief](briefs/squadup-brief.md) for scope and roadmap.
@@ -158,6 +161,20 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml run --rm app php
 # (In prod, Wayfinder types are built into the assets stage during `npm run build`.)
 ```
 
+### Fully-isolated prod environment
+
+By default, dev and prod stacks share Postgres / Redis / MinIO volumes — simpler for a solo dev cycle, but you'll see dev data in prod mode. If you want true isolation (fresh DB to test a cold-start migration, no dev artefacts in view):
+
+```bash
+# Isolated prod — separate project prefix gets its own volumes and network
+docker compose -p squadup-prod -f docker-compose.yml -f docker-compose.prod.yml up --build
+
+# Isolated dev
+docker compose -p squadup-dev up
+```
+
+Only one can run at a time (host ports clash), but the volumes / data are fully separate.
+
 ### Dockerfile stages
 
 | Stage | Purpose | What ships |
@@ -185,6 +202,20 @@ X-Served-By: 9c2b5f1a6789
 ```
 
 You can also visit the Traefik dashboard (http://localhost:8081) and browse to **HTTP → Services → app** to see both replicas listed as live backends.
+
+## Running tests
+
+```bash
+docker compose exec app php artisan test --compact
+```
+
+Tests run against Postgres (database `squadup_test`) to match the prod driver — catches JSON / case / date quirks that SQLite `:memory:` would silently paper over.
+
+`squadup_test` is created automatically by `docker/postgres/init-test-db.sql` the first time the `postgres` volume is initialised. If you're upgrading from an older compose stack and your existing volume never ran the init script, create it once manually:
+
+```bash
+docker compose exec postgres psql -U squadup -d squadup -c "CREATE DATABASE squadup_test OWNER squadup;"
+```
 
 ## Useful commands
 
@@ -239,7 +270,7 @@ This is a phased build. Each phase has explicit exit criteria in the [brief](bri
 
 | Phase | Scope | Status |
 |---|---|---|
-| **0 — Foundation** | Docker Compose (app, Postgres, Redis, MinIO, Reverb, queue, scheduler, LB, Vite), multi-stage prod Dockerfile, GitHub Actions CI | In progress (commits 1-5 of ~6 done) |
+| **0 — Foundation** | Docker Compose (app, Postgres, Redis, MinIO, Reverb, queue, scheduler, LB, Vite), multi-stage prod Dockerfile, GitHub Actions CI | **Done** |
 | **1 — Core social** | Posts, follows, timeline, likes, replies, profiles, game catalog | Planned |
 | **2 — LFG differentiator** | LFG post schema, filterable LFG board, join-request flow | Planned |
 | **3 — DMs & real-time** | 1:1 and group DMs, Reverb-backed delivery, notifications, admin reports queue | Planned |
