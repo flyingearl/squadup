@@ -1,7 +1,10 @@
 # Single-stage image for development.
 # A multi-stage refactor (builder + prod runtime) lands in a later commit
 # when we add the production compose file.
-FROM php:8.3-fpm-bookworm
+#
+# PHP 8.4 matches the host (Herd default) and satisfies composer.lock,
+# which resolves some deps to require >= 8.4.
+FROM php:8.4-fpm-bookworm
 
 ENV DEBIAN_FRONTEND=noninteractive \
     COMPOSER_ALLOW_SUPERUSER=1 \

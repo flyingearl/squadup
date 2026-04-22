@@ -313,7 +313,7 @@ Acceptance criteria:
 
 | Layer | Choice | Why |
 |---|---|---|
-| Runtime | PHP 8.3 | Already locked by starter kit |
+| Runtime | PHP 8.4 | Host (Herd) default; composer.lock resolves to >= 8.4 |
 | Framework | Laravel 13 | Already locked |
 | DB | Postgres 16 | Swap from SQLite early — avoids late migration pain |
 | Cache / Queue / Session | Redis 7 | Standard combo |
