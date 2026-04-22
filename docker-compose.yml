@@ -1,0 +1,91 @@
+# Base compose file — dev-oriented for now. A prod override will be
+# added once the Dockerfile grows a dedicated prod stage (Phase 0, commit 5).
+#
+# Services at this point: app (nginx + php-fpm), postgres, redis, minio.
+# Load balancer / replicas / Reverb / queue worker / scheduler land in later commits.
+
+services:
+  app:
+    build:
+      context: .
+    image: squadup/app:dev
+    container_name: squadup-app
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    volumes:
+      # Bind-mount the project so edits on host are live inside the container.
+      - .:/var/www/html
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    networks:
+      - squadup
+
+  postgres:
+    image: postgres:16-bookworm
+    container_name: squadup-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_DATABASE:-squadup}
+      POSTGRES_USER: ${DB_USERNAME:-squadup}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-squadup}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-squadup} -d ${DB_DATABASE:-squadup}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - squadup
+
+  redis:
+    image: redis:7-bookworm
+    container_name: squadup-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - squadup
+
+  minio:
+    image: minio/minio:latest
+    container_name: squadup-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-squadup}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-squadup-secret}
+    volumes:
+      - minio-data:/data
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Web console
+    networks:
+      - squadup
+
+volumes:
+  postgres-data:
+  redis-data:
+  minio-data:
+
+networks:
+  squadup:
+    driver: bridge
