@@ -144,8 +144,13 @@ jobs:
 
       - name: Start prod stack
         run: |
+          # minio-init is a one-shot that exits 0 after creating the bucket.
+          # `--wait` treats exited containers as failed, so we don't list it
+          # here; we also don't need the bucket for a /up smoke test.
+          # reverb, queue-worker, and scheduler are excluded — the smoke
+          # test only cares that the web replicas serve traffic via Traefik.
           docker compose -f docker-compose.yml -f docker-compose.prod.yml \
-            up -d --wait postgres redis minio minio-init mailpit traefik app
+            up -d --wait postgres redis minio mailpit traefik app
 
       - name: Smoke test /up
         run: |
