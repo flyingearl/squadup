@@ -1,20 +1,49 @@
 # Base compose file — dev-oriented for now. A prod override will be
 # added once the Dockerfile grows a dedicated prod stage (Phase 0, commit 5).
 #
-# Services at this point: app (nginx + php-fpm), postgres, redis, minio.
-# Load balancer / replicas / Reverb / queue worker / scheduler land in later commits.
+# Current services: traefik (load balancer + reverse proxy), app x2 replicas
+# (nginx + php-fpm), postgres, redis, minio.
+# Reverb / queue worker / scheduler / mailpit land in the next commit.
 
 services:
+  # Reverse proxy + load balancer. Uses the Docker provider, so services opt
+  # into being routable by adding `traefik.*` labels — no separate config
+  # file to maintain. Dashboard on :8081 shows discovered routes and
+  # per-replica health, which is how we'll verify round-robin below.
+  traefik:
+    image: traefik:v3.1
+    container_name: squadup-traefik
+    restart: unless-stopped
+    command:
+      - --api.dashboard=true
+      - --api.insecure=true                          # Dashboard on plain HTTP — dev only.
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false    # Opt-in: services must set traefik.enable=true.
+      - --entrypoints.web.address=:80
+      - --entrypoints.traefik.address=:8080          # Dashboard entrypoint (internal).
+      - --log.level=INFO
+      - --accesslog=true
+    ports:
+      - "8080:80"       # App entry — same host port as before so muscle memory survives.
+      - "8081:8080"     # Traefik dashboard at http://localhost:8081
+    volumes:
+      # Docker provider reads container labels through the socket.
+      # Read-only: Traefik only needs to list and watch, never mutate.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - app
+    networks:
+      - squadup
+
   app:
     build:
       context: .
     image: squadup/app:dev
-    container_name: squadup-app
+    # container_name removed: Compose must be free to name replicas
+    # (squadup-app-1, squadup-app-2) without collisions.
     restart: unless-stopped
-    ports:
-      - "8080:80"
+    # No host ports — Traefik fronts the app on :80 of the squadup network.
     volumes:
-      # Bind-mount the project so edits on host are live inside the container.
       - .:/var/www/html
     env_file:
       - .env
@@ -25,6 +54,20 @@ services:
         condition: service_healthy
       minio:
         condition: service_started
+    deploy:
+      # Two replicas behind Traefik. Round-robin proof:
+      #   for i in 1 2 3 4; do curl -sI http://localhost:8080 | grep -i served-by; done
+      replicas: 2
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.app.rule=Host(`localhost`) || Host(`127.0.0.1`)"
+      - "traefik.http.routers.app.entrypoints=web"
+      - "traefik.http.services.app.loadbalancer.server.port=80"
+      # Use nginx's /up endpoint as the per-replica Traefik healthcheck — a
+      # failing replica is pulled out of rotation automatically.
+      - "traefik.http.services.app.loadbalancer.healthcheck.path=/up"
+      - "traefik.http.services.app.loadbalancer.healthcheck.interval=10s"
+      - "traefik.http.services.app.loadbalancer.healthcheck.timeout=3s"
     networks:
       - squadup
 

@@ -50,7 +50,8 @@ First build takes 5-10 minutes (PHP extensions compile from source). Afterwards,
 
 | Service | Port | Notes |
 |---|---|---|
-| App (nginx) | `8080` | Laravel welcome page / SPA |
+| App (via Traefik) | `8080` | Laravel welcome page / SPA — load-balanced across 2 replicas |
+| Traefik dashboard | `8081` | http://localhost:8081 — shows discovered services, replicas, healthchecks |
 | Postgres | `5432` | `squadup / squadup / squadup` (db / user / pass, dev only) |
 | Redis | `6379` | no auth, dev only |
 | MinIO S3 API | `9000` | `squadup / squadup-secret` |
@@ -60,56 +61,82 @@ Credentials live in `.env.example` — they're dev defaults, not secrets, and on
 
 ## Architecture
 
-Current state (end of Phase 0 commit 1):
+Current state (end of Phase 0 commit 2):
 
 ```
-                    ┌──────────┐
-  localhost:8080 ─▶ │   app    │  nginx + php-fpm 8.4 + supervisor (one container)
-                    └────┬─────┘
-                         │
-          ┌──────────────┼──────────────┐
-          ▼              ▼              ▼
-    ┌──────────┐  ┌──────────┐  ┌──────────┐
-    │ postgres │  │  redis   │  │  minio   │
-    │   :5432  │  │  :6379   │  │ :9000/1  │
-    └──────────┘  └──────────┘  └──────────┘
+                        ┌────────────┐
+   localhost:8080 ────▶ │  Traefik   │ ──▶ dashboard at :8081
+                        └─────┬──────┘
+                              │
+                    ┌─────────┴─────────┐
+                    ▼                   ▼
+              ┌──────────┐        ┌──────────┐
+              │  app-1   │        │  app-2   │  nginx + php-fpm 8.4 + supervisor
+              └────┬─────┘        └────┬─────┘
+                   └──────┬─────────────┘
+                          │
+              ┌───────────┼───────────┐
+              ▼           ▼           ▼
+         ┌────────┐  ┌────────┐  ┌────────┐
+         │postgres│  │ redis  │  │ minio  │
+         │ :5432  │  │ :6379  │  │:9000/1 │
+         └────────┘  └────────┘  └────────┘
 ```
 
 Planned topology at end of Phase 0:
 
 ```
-                   ┌─────────────┐
-           :443 ─▶ │   Traefik   │  reverse proxy + LB
-                   └──────┬──────┘
+                        ┌────────────┐
+                 :443 ──▶│  Traefik   │
+                        └─────┬──────┘
+                              │
+                    ┌─────────┴─────────┐
+                    ▼                   ▼
+              ┌──────────┐        ┌──────────┐
+              │  app-1   │        │  app-2   │
+              └────┬─────┘        └────┬─────┘
+                   └──────┬─────────────┘
                           │
-                ┌─────────┴─────────┐
-                ▼                   ▼
-          ┌──────────┐        ┌──────────┐
-          │  app-1   │        │  app-2   │
-          └────┬─────┘        └────┬─────┘
-               └──────┬─────────────┘
-                      │
-   ┌────────┬─────────┼─────────┬─────────┬──────────┐
-   ▼        ▼         ▼         ▼         ▼          ▼
-┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────────┐ ┌─────┐
-│ pg   │ │redis │ │reverb│ │minio │ │  queue   │ │ mail│
-│      │ │      │ │      │ │      │ │  worker  │ │ pit │
-└──────┘ └──────┘ └──────┘ └──────┘ └──────────┘ └─────┘
-                               ▲
-                               │
-                        ┌──────┴─────┐
-                        │ scheduler  │
-                        └────────────┘
+   ┌────────┬────────┬────┼────┬────────┬─────────┬─────────┐
+   ▼        ▼        ▼    ▼    ▼        ▼         ▼         ▼
+┌──────┐ ┌─────┐ ┌──────┐ ┌─────┐ ┌─────────┐ ┌────────┐ ┌──────┐
+│  pg  │ │redis│ │reverb│ │minio│ │  queue  │ │mailpit │ │ vite │
+│      │ │     │ │      │ │     │ │ worker  │ │  :8025 │ │ HMR  │
+└──────┘ └─────┘ └──────┘ └─────┘ └─────────┘ └────────┘ └──────┘
+                              ▲
+                              │
+                       ┌──────┴─────┐
+                       │ scheduler  │
+                       └────────────┘
 ```
 
 ## What each container does
 
 | Service | Image | Role |
 |---|---|---|
-| `app` | built from `Dockerfile` | Serves the Laravel SPA. Runs nginx + php-fpm 8.4 + supervisor. Entrypoint runs composer install (if needed), generates `APP_KEY`, runs migrations on boot. |
+| `traefik` | `traefik:v3.1` | Reverse proxy and load balancer. Discovers app replicas via Docker labels (no separate config file). Fronts the app on `:8080` and exposes a read-only dashboard on `:8081`. |
+| `app` (×2 replicas) | built from `Dockerfile` | Serves the Laravel SPA. Runs nginx + php-fpm 8.4 + supervisor. Entrypoint runs composer install (if needed), generates `APP_KEY`, runs migrations on boot. No direct host port — reachable only via Traefik. |
 | `postgres` | `postgres:16-bookworm` | Primary database. Data persisted in the `postgres-data` named volume. Healthcheck: `pg_isready`. |
 | `redis` | `redis:7-bookworm` | Cache, sessions, and queue broker. Append-only persistence. Healthcheck: `redis-cli ping`. |
 | `minio` | `minio/minio:latest` | S3-compatible object storage for user uploads. Laravel's built-in `s3` filesystem driver points at it via `AWS_ENDPOINT=http://minio:9000` — no code changes needed to swap to real S3 in production. |
+
+### Proving round-robin works
+
+Every response from the app carries an `X-Served-By` header set to the container ID of the replica that handled it. Hit the app a few times:
+
+```bash
+for i in 1 2 3 4; do curl -sI http://localhost:8080 | grep -i served-by; done
+```
+
+Expected output — two distinct container IDs alternating:
+```
+X-Served-By: 7f3a8d9e1234
+X-Served-By: 9c2b5f1a6789
+X-Served-By: 7f3a8d9e1234
+X-Served-By: 9c2b5f1a6789
+```
+
+You can also visit the Traefik dashboard (http://localhost:8081) and browse to **HTTP → Services → app** to see both replicas listed as live backends.
 
 ## Useful commands
 
@@ -125,11 +152,15 @@ docker compose logs -f app        # tail app logs
 docker compose logs postgres      # last Postgres logs
 docker compose ps                 # status + healthchecks
 
-# Shell into the app container
+# Shell into an app replica (Compose picks one of the two automatically)
 docker compose exec app bash      # interactive shell
 docker compose exec app php artisan migrate:fresh --seed
 docker compose exec app composer install
 docker compose exec app php artisan tinker
+
+# Target a specific replica
+docker compose exec --index=1 app bash   # squadup-app-1
+docker compose exec --index=2 app bash   # squadup-app-2
 
 # DB access (from host)
 docker compose exec postgres psql -U squadup -d squadup
@@ -160,7 +191,7 @@ This is a phased build. Each phase has explicit exit criteria in the [brief](bri
 
 | Phase | Scope | Status |
 |---|---|---|
-| **0 — Foundation** | Docker Compose (app, Postgres, Redis, MinIO, Reverb, queue, scheduler, LB), GitHub Actions CI | In progress (commit 1 of ~6 done) |
+| **0 — Foundation** | Docker Compose (app, Postgres, Redis, MinIO, Reverb, queue, scheduler, LB), GitHub Actions CI | In progress (commits 1-2 of ~6 done) |
 | **1 — Core social** | Posts, follows, timeline, likes, replies, profiles, game catalog | Planned |
 | **2 — LFG differentiator** | LFG post schema, filterable LFG board, join-request flow | Planned |
 | **3 — DMs & real-time** | 1:1 and group DMs, Reverb-backed delivery, notifications, admin reports queue | Planned |
