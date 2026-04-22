@@ -28,9 +28,13 @@ fi
 chown -R www-data:www-data storage bootstrap/cache
 chmod -R 775 storage bootstrap/cache
 
-# 5. Run migrations. Safe to re-run every boot (idempotent).
-php artisan migrate --force
+# 5. Web replicas own migrations (run on every boot — idempotent).
+#    Queue workers, the scheduler, and Reverb skip this step so they don't
+#    race each other on startup — their CONTAINER_ROLE is set in compose.
+if [ "${CONTAINER_ROLE:-web}" = "web" ]; then
+    php artisan migrate --force
+fi
 
-echo "[entrypoint] boot complete — handing off to supervisor."
+echo "[entrypoint] boot complete (role=${CONTAINER_ROLE:-web}) — handing off to supervisor."
 
 exec "$@"

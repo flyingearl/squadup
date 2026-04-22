@@ -1,9 +1,12 @@
 # Base compose file — dev-oriented for now. A prod override will be
 # added once the Dockerfile grows a dedicated prod stage (Phase 0, commit 5).
 #
-# Current services: traefik (load balancer + reverse proxy), app x2 replicas
-# (nginx + php-fpm), postgres, redis, minio.
-# Reverb / queue worker / scheduler / mailpit land in the next commit.
+# Current services: traefik (LB), app x2 (web), reverb (websockets),
+# queue-worker, scheduler, postgres, redis, minio, mailpit,
+# minio-init (one-shot bucket bootstrap).
+#
+# All PHP-side services share the `squadup/app:dev` image. CONTAINER_ROLE
+# distinguishes them at boot so only `web` runs migrations (avoids races).
 
 services:
   # Reverse proxy + load balancer. Uses the Docker provider, so services opt
@@ -47,6 +50,9 @@ services:
       - .:/var/www/html
     env_file:
       - .env
+    environment:
+      # Web replicas own migrations. See docker/entrypoint.sh.
+      CONTAINER_ROLE: web
     depends_on:
       postgres:
         condition: service_healthy
@@ -68,6 +74,116 @@ services:
       - "traefik.http.services.app.loadbalancer.healthcheck.path=/up"
       - "traefik.http.services.app.loadbalancer.healthcheck.interval=10s"
       - "traefik.http.services.app.loadbalancer.healthcheck.timeout=3s"
+    networks:
+      - squadup
+
+  # Laravel's native websocket server. Broadcasts events to connected browsers
+  # for DMs, notifications, and LFG join requests (wired up in later phases).
+  # Runs the same app image but overrides CMD to start the Reverb daemon.
+  # Browsers connect directly via localhost:8082 — not through Traefik for
+  # now, since WebSocket routing adds Traefik labels we don't need yet.
+  reverb:
+    image: squadup/app:dev
+    container_name: squadup-reverb
+    restart: unless-stopped
+    command: ["php", "artisan", "reverb:start", "--host=0.0.0.0", "--port=8080"]
+    ports:
+      - "8082:8080"
+    volumes:
+      - .:/var/www/html
+    env_file:
+      - .env
+    environment:
+      CONTAINER_ROLE: reverb
+    # The image-level HEALTHCHECK hits `/up` on nginx — irrelevant here.
+    # Docker already reports this container as running; that's sufficient.
+    healthcheck:
+      disable: true
+    depends_on:
+      app:
+        condition: service_started    # waits for the image build and for migrations to run
+      redis:
+        condition: service_healthy
+    networks:
+      - squadup
+
+  # Processes queued jobs: notification fanout, image post-processing,
+  # scheduled broadcast emits, etc. Restart policy ensures a crashed
+  # worker respawns — real prod would use horizon but we're explicit here.
+  queue-worker:
+    image: squadup/app:dev
+    container_name: squadup-queue-worker
+    restart: unless-stopped
+    command: ["php", "artisan", "queue:work", "--queue=default", "--tries=3", "--timeout=90", "--sleep=1"]
+    volumes:
+      - .:/var/www/html
+    env_file:
+      - .env
+    environment:
+      CONTAINER_ROLE: queue
+    healthcheck:
+      disable: true    # no nginx in this role; process liveness is enough
+    depends_on:
+      app:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    networks:
+      - squadup
+
+  # Cron replacement. `schedule:work` is Laravel 11+ native — keeps a loop
+  # running and dispatches scheduled tasks every minute. No host cron needed.
+  scheduler:
+    image: squadup/app:dev
+    container_name: squadup-scheduler
+    restart: unless-stopped
+    command: ["php", "artisan", "schedule:work"]
+    volumes:
+      - .:/var/www/html
+    env_file:
+      - .env
+    environment:
+      CONTAINER_ROLE: scheduler
+    healthcheck:
+      disable: true    # no nginx in this role; process liveness is enough
+    depends_on:
+      app:
+        condition: service_started
+    networks:
+      - squadup
+
+  # Catches all outbound mail in dev. Swap MAIL_MAILER -> smtp and point at
+  # a real provider in prod by changing env vars only.
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: squadup-mailpit
+    restart: unless-stopped
+    ports:
+      - "1025:1025"    # SMTP — what Laravel connects to
+      - "8025:8025"    # Web UI — http://localhost:8025
+    networks:
+      - squadup
+
+  # One-shot: waits for MinIO to be up, creates the `squadup` bucket if
+  # missing, sets a permissive download policy so dev uploads are viewable
+  # via direct URL. Exits 0 after running; compose treats that as success.
+  minio-init:
+    image: minio/mc:latest
+    container_name: squadup-minio-init
+    depends_on:
+      minio:
+        condition: service_started
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD}; do
+        echo 'waiting for minio...'; sleep 1;
+      done;
+      mc mb --ignore-existing local/$${AWS_BUCKET};
+      mc anonymous set download local/$${AWS_BUCKET};
+      echo \"minio-init: bucket $${AWS_BUCKET} ready.\";
+      "
+    env_file:
+      - .env
     networks:
       - squadup
 

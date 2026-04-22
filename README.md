@@ -52,6 +52,9 @@ First build takes 5-10 minutes (PHP extensions compile from source). Afterwards,
 |---|---|---|
 | App (via Traefik) | `8080` | Laravel welcome page / SPA — load-balanced across 2 replicas |
 | Traefik dashboard | `8081` | http://localhost:8081 — shows discovered services, replicas, healthchecks |
+| Reverb (websockets) | `8082` | Browser WebSocket endpoint for real-time features |
+| Mailpit SMTP | `1025` | Laravel's mail connection target (dev) |
+| Mailpit web UI | `8025` | http://localhost:8025 — view outbound mail |
 | Postgres | `5432` | `squadup / squadup / squadup` (db / user / pass, dev only) |
 | Redis | `6379` | no auth, dev only |
 | MinIO S3 API | `9000` | `squadup / squadup-secret` |
@@ -61,26 +64,24 @@ Credentials live in `.env.example` — they're dev defaults, not secrets, and on
 
 ## Architecture
 
-Current state (end of Phase 0 commit 2):
+Current state (end of Phase 0 commit 3):
 
 ```
-                        ┌────────────┐
-   localhost:8080 ────▶ │  Traefik   │ ──▶ dashboard at :8081
-                        └─────┬──────┘
-                              │
-                    ┌─────────┴─────────┐
-                    ▼                   ▼
-              ┌──────────┐        ┌──────────┐
-              │  app-1   │        │  app-2   │  nginx + php-fpm 8.4 + supervisor
-              └────┬─────┘        └────┬─────┘
-                   └──────┬─────────────┘
-                          │
-              ┌───────────┼───────────┐
-              ▼           ▼           ▼
-         ┌────────┐  ┌────────┐  ┌────────┐
-         │postgres│  │ redis  │  │ minio  │
-         │ :5432  │  │ :6379  │  │:9000/1 │
-         └────────┘  └────────┘  └────────┘
+   localhost:8080 ─▶ traefik ─▶ dashboard :8081
+                         │
+           ┌─────────────┴─────────────┐
+           ▼                           ▼
+      ┌────────┐                  ┌────────┐
+      │ app-1  │                  │ app-2  │   nginx + php-fpm 8.4 + supervisor
+      └───┬────┘                  └───┬────┘
+          └──────────┬─────────────────┘
+                     │
+    ┌─────┬──────────┼──────────┬──────────┬──────────┬───────────┐
+    ▼     ▼          ▼          ▼          ▼          ▼           ▼
+ ┌────┐ ┌────┐  ┌────────┐  ┌───────┐  ┌────────┐ ┌───────┐ ┌─────────┐
+ │ pg │ │redis│ │ reverb │  │ minio │  │  queue │ │  sched│ │ mailpit │
+ │    │ │     │ │  :8082 │  │:9000/1│  │ worker │ │ uler  │ │ :8025   │
+ └────┘ └─────┘ └────────┘  └───────┘  └────────┘ └───────┘ └─────────┘
 ```
 
 Planned topology at end of Phase 0:
@@ -114,11 +115,18 @@ Planned topology at end of Phase 0:
 
 | Service | Image | Role |
 |---|---|---|
-| `traefik` | `traefik:v3.1` | Reverse proxy and load balancer. Discovers app replicas via Docker labels (no separate config file). Fronts the app on `:8080` and exposes a read-only dashboard on `:8081`. |
-| `app` (×2 replicas) | built from `Dockerfile` | Serves the Laravel SPA. Runs nginx + php-fpm 8.4 + supervisor. Entrypoint runs composer install (if needed), generates `APP_KEY`, runs migrations on boot. No direct host port — reachable only via Traefik. |
-| `postgres` | `postgres:16-bookworm` | Primary database. Data persisted in the `postgres-data` named volume. Healthcheck: `pg_isready`. |
-| `redis` | `redis:7-bookworm` | Cache, sessions, and queue broker. Append-only persistence. Healthcheck: `redis-cli ping`. |
-| `minio` | `minio/minio:latest` | S3-compatible object storage for user uploads. Laravel's built-in `s3` filesystem driver points at it via `AWS_ENDPOINT=http://minio:9000` — no code changes needed to swap to real S3 in production. |
+| `traefik` | `traefik:v3.1` | Reverse proxy + load balancer. Docker-label discovery, dashboard on `:8081`. |
+| `app` (×2 replicas) | built from `Dockerfile` | Laravel SPA. nginx + php-fpm 8.4 + supervisor. Only role that runs migrations (`CONTAINER_ROLE=web`). |
+| `reverb` | same app image | Laravel Reverb websocket server, bound to `:8080` inside, mapped to `localhost:8082` on the host. |
+| `queue-worker` | same app image | `php artisan queue:work` — processes queued jobs via Redis. |
+| `scheduler` | same app image | `php artisan schedule:work` — Laravel-native cron replacement. |
+| `postgres` | `postgres:16-bookworm` | Primary database. `postgres-data` named volume. `pg_isready` healthcheck. |
+| `redis` | `redis:7-bookworm` | Cache, sessions, queue broker, and Reverb scaling channel. `redis-cli ping` healthcheck. |
+| `minio` | `minio/minio:latest` | S3-compatible object storage. `s3` filesystem driver connects via `AWS_ENDPOINT=http://minio:9000`. |
+| `minio-init` | `minio/mc:latest` | One-shot: waits for MinIO, creates the `squadup` bucket, sets a download policy. Exits after running. |
+| `mailpit` | `axllent/mailpit:latest` | SMTP catcher. Laravel sends to `mailpit:1025`; view the inbox at http://localhost:8025. |
+
+All PHP-side services (app, reverb, queue-worker, scheduler) share the same built image. They differ only in the command that `supervisord`/`entrypoint` execs and the `CONTAINER_ROLE` env var (which tells the entrypoint whether to run migrations).
 
 ### Proving round-robin works
 
@@ -191,7 +199,7 @@ This is a phased build. Each phase has explicit exit criteria in the [brief](bri
 
 | Phase | Scope | Status |
 |---|---|---|
-| **0 — Foundation** | Docker Compose (app, Postgres, Redis, MinIO, Reverb, queue, scheduler, LB), GitHub Actions CI | In progress (commits 1-2 of ~6 done) |
+| **0 — Foundation** | Docker Compose (app, Postgres, Redis, MinIO, Reverb, queue, scheduler, LB), GitHub Actions CI | In progress (commits 1-3 of ~6 done) |
 | **1 — Core social** | Posts, follows, timeline, likes, replies, profiles, game catalog | Planned |
 | **2 — LFG differentiator** | LFG post schema, filterable LFG board, join-request flow | Planned |
 | **3 — DMs & real-time** | 1:1 and group DMs, Reverb-backed delivery, notifications, admin reports queue | Planned |
