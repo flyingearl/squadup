@@ -132,13 +132,41 @@ Planned topology at end of Phase 0:
 
 All PHP-side services (app, reverb, queue-worker, scheduler) share the same built image. They differ only in the command that `supervisord`/`entrypoint` execs and the `CONTAINER_ROLE` env var (which tells the entrypoint whether to run migrations).
 
-### Why a `docker-compose.override.yml`?
+### Why three compose files?
 
-Compose automatically merges `docker-compose.override.yml` on top of the base file when you run `docker compose up`. This repo uses the split deliberately:
+Compose automatically merges `docker-compose.override.yml` on top of the base file when you run `docker compose up` with no `-f` flags. Explicit `-f` flags skip the auto-loaded override. This repo uses the split deliberately:
 
-- **`docker-compose.yml`** — the production-shaped stack. Shared between dev and CI.
-- **`docker-compose.override.yml`** — dev-only additions: the Vite container, bind mounts, anything that shouldn't ship.
-- **`docker-compose.prod.yml`** *(coming in commit 5)* — production-only settings: pre-built assets, read-only filesystems, no source bind mounts. Run with `docker compose -f docker-compose.yml -f docker-compose.prod.yml up`.
+- **`docker-compose.yml`** — the production-shaped stack. Shared between dev and prod.
+- **`docker-compose.override.yml`** — dev-only additions: the Vite container, anything that shouldn't ship.
+- **`docker-compose.prod.yml`** — prod overlay: `build.target: prod`, no bind mounts, `APP_ENV=production`.
+
+### Running in production mode locally
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build
+```
+
+This builds the `prod` target of the multi-stage `Dockerfile` — a slim image with composer deps installed `--no-dev`, assets pre-built by a dedicated Node stage, opcache set to `validate_timestamps=0` (never re-checks file mtimes), and no Vite container. The app runs entirely from baked code — edits to host files don't affect the running containers until you rebuild.
+
+Useful commands inside a prod run:
+
+```bash
+# One-shot migration (prod entrypoint doesn't auto-migrate — that's a deploy concern)
+docker compose -f docker-compose.yml -f docker-compose.prod.yml run --rm app php artisan migrate --force
+
+# Regenerate Wayfinder types into a prod image (rare — normally part of the build)
+# (In prod, Wayfinder types are built into the assets stage during `npm run build`.)
+```
+
+### Dockerfile stages
+
+| Stage | Purpose | What ships |
+|---|---|---|
+| `base` | PHP + extensions + nginx + supervisor | Common to every other stage |
+| `dev` | base + dev `php.ini` + dev entrypoint | Current default target; includes composer install on boot, bind mount expected |
+| `vendor` | `composer install --no-dev --optimize-autoloader` | Only the resulting `vendor/` directory |
+| `assets` | Node 20 + `npm ci && npm run build` | Only the resulting `public/build/` directory |
+| `prod` | base + prod `php.ini` + prod entrypoint + baked code + vendor + assets | Self-contained production image |
 
 ### Proving round-robin works
 
@@ -211,7 +239,7 @@ This is a phased build. Each phase has explicit exit criteria in the [brief](bri
 
 | Phase | Scope | Status |
 |---|---|---|
-| **0 — Foundation** | Docker Compose (app, Postgres, Redis, MinIO, Reverb, queue, scheduler, LB, Vite), GitHub Actions CI | In progress (commits 1-4 of ~6 done) |
+| **0 — Foundation** | Docker Compose (app, Postgres, Redis, MinIO, Reverb, queue, scheduler, LB, Vite), multi-stage prod Dockerfile, GitHub Actions CI | In progress (commits 1-5 of ~6 done) |
 | **1 — Core social** | Posts, follows, timeline, likes, replies, profiles, game catalog | Planned |
 | **2 — LFG differentiator** | LFG post schema, filterable LFG board, join-request flow | Planned |
 | **3 — DMs & real-time** | 1:1 and group DMs, Reverb-backed delivery, notifications, admin reports queue | Planned |

@@ -41,6 +41,7 @@ services:
   app:
     build:
       context: .
+      target: dev    # prod overlay (docker-compose.prod.yml) switches to `prod`
     image: squadup/app:dev
     # container_name removed: Compose must be free to name replicas
     # (squadup-app-1, squadup-app-2) without collisions.

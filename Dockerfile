@@ -1,19 +1,31 @@
-# Single-stage image for development.
-# A multi-stage refactor (builder + prod runtime) lands in a later commit
-# when we add the production compose file.
+# Multi-stage build.
 #
-# PHP 8.4 matches the host (Herd default) and satisfies composer.lock,
-# which resolves some deps to require >= 8.4.
-FROM php:8.4-fpm-bookworm
+#   base    — system packages + PHP extensions (shared between dev and prod)
+#   dev     — base + dev php.ini + dev entrypoint (composer install on boot,
+#             migrate on boot, bind-mounted source expected at runtime)
+#   vendor  — base + composer install --no-dev (just the output `vendor/`)
+#   assets  — node + npm run build (just the output `public/build/`)
+#   prod    — base + prod php.ini + prod entrypoint + baked code + vendor +
+#             built assets (no bind mounts, no composer at runtime)
+#
+# Dev:  `docker compose up --build` builds the `dev` target by default
+#       because `docker-compose.yml` doesn't pin `target:`.
+# Prod: `docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build`
+#       sets `build.target: prod` on the app service.
+
+# --- base -------------------------------------------------------------------
+# PHP 8.4 matches the host (Herd) and satisfies composer.lock, which resolves
+# some deps to require >= 8.4.
+FROM php:8.4-fpm-bookworm AS base
 
 ENV DEBIAN_FRONTEND=noninteractive \
     COMPOSER_ALLOW_SUPERUSER=1 \
     COMPOSER_NO_INTERACTION=1
 
-# System packages: nginx + supervisor for the app, build deps for PHP extensions,
-# libpq for Postgres, image libs for gd, unzip for composer, curl for healthcheck.
-# $PHPIZE_DEPS is provided by the PHP base image — it's the compiler toolchain
-# (gcc, make, autoconf, etc.) needed to build PECL extensions like redis.
+# System packages: nginx + supervisor for the app, build deps for PHP
+# extensions, libpq for Postgres, image libs for gd, unzip for composer,
+# curl for healthcheck. $PHPIZE_DEPS is the compiler toolchain needed by
+# PECL extensions like redis.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         $PHPIZE_DEPS \
         nginx \
@@ -30,7 +42,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libicu-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# PHP extensions Laravel + the app need.
 RUN docker-php-ext-configure gd --with-freetype --with-jpeg \
  && docker-php-ext-install -j"$(nproc)" \
         pdo_pgsql \
@@ -45,23 +56,80 @@ RUN docker-php-ext-configure gd --with-freetype --with-jpeg \
  && pecl install redis \
  && docker-php-ext-enable redis
 
-# Composer: copy the binary out of the official image rather than installing twice.
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
-
-# Config files.
-COPY docker/php/php.ini /usr/local/etc/php/conf.d/zz-app.ini
 COPY docker/nginx/default.conf /etc/nginx/conf.d/default.conf
 COPY docker/supervisor/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
-COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 
-# Remove the Debian nginx default site so our conf.d/default.conf wins.
 RUN rm -f /etc/nginx/sites-enabled/default \
- && chmod +x /usr/local/bin/entrypoint.sh \
  && mkdir -p /var/log/supervisor /run/nginx /run/php
 
 WORKDIR /var/www/html
 
-# Healthcheck hits Laravel's built-in /up endpoint (Laravel 11+).
+# --- dev --------------------------------------------------------------------
+FROM base AS dev
+
+COPY docker/php/php.ini /usr/local/etc/php/conf.d/zz-app.ini
+COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD curl -fsS http://127.0.0.1/up || exit 1
+
+EXPOSE 80
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
+
+# --- vendor -----------------------------------------------------------------
+# Builds a cached layer of production composer deps. The prod stage copies
+# the resulting vendor/ directory — nothing else from this stage ships.
+FROM base AS vendor
+
+COPY composer.json composer.lock ./
+RUN composer install \
+        --no-dev \
+        --prefer-dist \
+        --optimize-autoloader \
+        --no-scripts \
+        --no-progress
+
+# --- assets -----------------------------------------------------------------
+# Separate Node image to build public/build/. Kept lean — only package.json,
+# package-lock.json, and enough source to run the Vite build.
+FROM node:20-bookworm-slim AS assets
+
+WORKDIR /var/www/html
+
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund
+
+# SKIP_WAYFINDER_AUTO — the vite build otherwise shells out to `php artisan
+# wayfinder:generate`, which has no PHP in the Node image. Types were
+# committed to the repo by the app container's entrypoint in dev; prod
+# consumes the same files that the app container regenerates on dev boots.
+ENV SKIP_WAYFINDER_AUTO=1
+
+COPY . .
+RUN npm run build
+
+# --- prod -------------------------------------------------------------------
+FROM base AS prod
+
+COPY docker/php/php.prod.ini /usr/local/etc/php/conf.d/zz-app.ini
+COPY docker/entrypoint.prod.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# App source (honours .dockerignore — .env, vendor, node_modules excluded).
+COPY . /var/www/html
+
+# Bake vendor/ and public/build/ from the dedicated stages.
+COPY --from=vendor /var/www/html/vendor /var/www/html/vendor
+COPY --from=assets /var/www/html/public/build /var/www/html/public/build
+
+# Writable paths owned by www-data. Everything else is read-only by default
+# because php-fpm runs as www-data (see php-fpm config).
+RUN chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache
+
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD curl -fsS http://127.0.0.1/up || exit 1
 
