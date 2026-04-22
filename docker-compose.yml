@@ -47,8 +47,8 @@ services:
     # (squadup-app-1, squadup-app-2) without collisions.
     restart: unless-stopped
     # No host ports — Traefik fronts the app on :80 of the squadup network.
-    volumes:
-      - .:/var/www/html
+    # No bind mount here: dev adds `.:/var/www/html` via the override file;
+    # prod runs entirely from the baked image.
     env_file:
       - .env
     environment:
@@ -90,8 +90,7 @@ services:
     command: ["php", "artisan", "reverb:start", "--host=0.0.0.0", "--port=8080"]
     ports:
       - "8082:8080"
-    volumes:
-      - .:/var/www/html
+    # Dev override adds `.:/var/www/html`; prod runs from the baked image.
     env_file:
       - .env
     environment:
@@ -116,8 +115,7 @@ services:
     container_name: squadup-queue-worker
     restart: unless-stopped
     command: ["php", "artisan", "queue:work", "--queue=default", "--tries=3", "--timeout=90", "--sleep=1"]
-    volumes:
-      - .:/var/www/html
+    # Dev override adds `.:/var/www/html`; prod runs from the baked image.
     env_file:
       - .env
     environment:
@@ -139,8 +137,7 @@ services:
     container_name: squadup-scheduler
     restart: unless-stopped
     command: ["php", "artisan", "schedule:work"]
-    volumes:
-      - .:/var/www/html
+    # Dev override adds `.:/var/www/html`; prod runs from the baked image.
     env_file:
       - .env
     environment:

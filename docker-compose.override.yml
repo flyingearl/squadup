@@ -11,6 +11,26 @@
 # (pre-built assets, no Vite container, no bind mounts).
 
 services:
+  # Bind the project into each PHP-side service so edits on the host
+  # are immediately visible (HMR + composer + artisan). These mounts live
+  # here, not in docker-compose.yml, so the prod overlay doesn't inherit
+  # them — prod runs entirely from the baked image.
+  app:
+    volumes:
+      - .:/var/www/html
+
+  reverb:
+    volumes:
+      - .:/var/www/html
+
+  queue-worker:
+    volumes:
+      - .:/var/www/html
+
+  scheduler:
+    volumes:
+      - .:/var/www/html
+
   vite:
     image: node:20-bookworm-slim
     container_name: squadup-vite

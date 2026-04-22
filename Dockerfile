@@ -126,6 +126,13 @@ COPY . /var/www/html
 COPY --from=vendor /var/www/html/vendor /var/www/html/vendor
 COPY --from=assets /var/www/html/public/build /var/www/html/public/build
 
+# Regenerate the package manifest against the --no-dev vendor. Without
+# this, a host-built bootstrap/cache/packages.php can bleed through and
+# reference dev-only providers (e.g. laravel/boost → "Class not found").
+# The vendor stage couldn't run this itself because it lacks artisan.
+RUN rm -f bootstrap/cache/packages.php bootstrap/cache/services.php bootstrap/cache/config.php \
+ && php artisan package:discover --ansi
+
 # Writable paths owned by www-data. Everything else is read-only by default
 # because php-fpm runs as www-data (see php-fpm config).
 RUN chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache

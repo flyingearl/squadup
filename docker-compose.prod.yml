@@ -3,12 +3,14 @@
 #   docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build
 #
 # The dev override file (docker-compose.override.yml) is NOT loaded when
-# -f flags are passed explicitly, so the Vite container is absent.
+# -f flags are passed explicitly, so the Vite container is absent AND the
+# dev bind mounts (`.:/var/www/html`) are absent — prod runs entirely
+# from the baked image.
 #
 # Differences from dev:
 #   - build.target: prod   — multi-stage Dockerfile picks the prod stage
-#   - volumes: []          — no bind mount; source + vendor + assets are
-#                            baked into the image
+#   - image: squadup/app:prod on every PHP-side service so they share
+#     the built image rather than attempting to rebuild four times
 #   - APP_ENV=production   — disables debug features, enables caches
 #   - APP_DEBUG=false      — no error traces in responses
 
@@ -18,7 +20,6 @@ services:
       context: .
       target: prod
     image: squadup/app:prod
-    volumes: []
     environment:
       APP_ENV: production
       APP_DEBUG: "false"
@@ -26,7 +27,6 @@ services:
 
   reverb:
     image: squadup/app:prod
-    volumes: []
     environment:
       APP_ENV: production
       APP_DEBUG: "false"
@@ -34,7 +34,6 @@ services:
 
   queue-worker:
     image: squadup/app:prod
-    volumes: []
     environment:
       APP_ENV: production
       APP_DEBUG: "false"
@@ -42,7 +41,6 @@ services:
 
   scheduler:
     image: squadup/app:prod
-    volumes: []
     environment:
       APP_ENV: production
       APP_DEBUG: "false"

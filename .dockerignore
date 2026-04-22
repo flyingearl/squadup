@@ -19,6 +19,8 @@ public/build
 public/hot
 
 # Laravel writeable paths — container creates fresh.
+bootstrap/cache/*
+!bootstrap/cache/.gitignore
 storage/logs/*
 !storage/logs/.gitignore
 storage/framework/cache/data/*
