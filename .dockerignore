@@ -18,6 +18,13 @@ vendor
 public/build
 public/hot
 
+# Wayfinder output — always regenerated fresh by the Dockerfile's
+# wayfinder stage, so builds behave identically whether the host happens
+# to have stale generated files or not.
+resources/js/actions
+resources/js/routes
+resources/js/wayfinder
+
 # Laravel writeable paths — container creates fresh.
 bootstrap/cache/*
 !bootstrap/cache/.gitignore

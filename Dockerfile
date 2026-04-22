@@ -93,9 +93,26 @@ RUN composer install \
         --no-scripts \
         --no-progress
 
+# --- wayfinder --------------------------------------------------------------
+# Wayfinder enumerates Laravel routes and writes matching TS files into
+# resources/js/{actions,routes,wayfinder}/ — which Vue components import
+# via `@/routes`, `@/actions`, etc. The files are gitignored, so the Vite
+# build in the assets stage can't find them unless we generate here first.
+# The assets stage (Node) has no PHP, so we do it in this PHP-enabled stage
+# and copy the output across.
+FROM base AS wayfinder
+
+COPY --from=vendor /var/www/html/vendor ./vendor
+COPY . .
+# A throwaway env is enough — wayfinder:generate enumerates routes and
+# writes TS, it doesn't hit the database or Redis.
+RUN cp .env.example .env \
+ && php artisan key:generate --force --ansi \
+ && php artisan wayfinder:generate --with-form --ansi
+
 # --- assets -----------------------------------------------------------------
 # Separate Node image to build public/build/. Kept lean — only package.json,
-# package-lock.json, and enough source to run the Vite build.
+# package-lock.json, source, and the wayfinder-generated imports.
 FROM node:20-bookworm-slim AS assets
 
 WORKDIR /var/www/html
@@ -103,13 +120,16 @@ WORKDIR /var/www/html
 COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
 
-# SKIP_WAYFINDER_AUTO — the vite build otherwise shells out to `php artisan
-# wayfinder:generate`, which has no PHP in the Node image. Types were
-# committed to the repo by the app container's entrypoint in dev; prod
-# consumes the same files that the app container regenerates on dev boots.
+# SKIP_WAYFINDER_AUTO — the vite plugin otherwise shells out to `php artisan
+# wayfinder:generate`, which has no PHP in this Node image. Types come in
+# from the wayfinder stage via COPY below.
 ENV SKIP_WAYFINDER_AUTO=1
 
 COPY . .
+COPY --from=wayfinder /var/www/html/resources/js/routes    ./resources/js/routes
+COPY --from=wayfinder /var/www/html/resources/js/actions   ./resources/js/actions
+COPY --from=wayfinder /var/www/html/resources/js/wayfinder ./resources/js/wayfinder
+
 RUN npm run build
 
 # --- prod -------------------------------------------------------------------
