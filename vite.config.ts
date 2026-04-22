@@ -48,6 +48,12 @@ export default defineConfig({
         port: 5173,
         strictPort: true,
         origin: 'http://localhost:5173',
+        // The browser fetches assets from :5173 while the page is served
+        // from :8080 (Traefik). Vite 8's default CORS only allows its own
+        // origin, so allow any localhost port for dev.
+        cors: {
+            origin: /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/,
+        },
         hmr: {
             host: 'localhost',
         },
