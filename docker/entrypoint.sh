@@ -33,6 +33,11 @@ chmod -R 775 storage bootstrap/cache
 #    race each other on startup — their CONTAINER_ROLE is set in compose.
 if [ "${CONTAINER_ROLE:-web}" = "web" ]; then
     php artisan migrate --force
+    # Wayfinder generates TypeScript route/action imports consumed by Vite.
+    # We run it here (not in the Vite container) because only the app image
+    # has PHP. Regenerate on demand with:
+    #   docker compose exec app php artisan wayfinder:generate
+    php artisan wayfinder:generate --with-form || echo "[entrypoint] wayfinder:generate failed (non-fatal)"
 fi
 
 echo "[entrypoint] boot complete (role=${CONTAINER_ROLE:-web}) — handing off to supervisor."

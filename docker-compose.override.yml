@@ -1,0 +1,52 @@
+# Dev-only overrides. Compose loads this automatically alongside
+# docker-compose.yml when you run `docker compose up`, so dev concerns
+# live here instead of polluting the base file.
+#
+# Currently: a Vite dev-server container that handles Tailwind + Vue HMR,
+# plus Wayfinder type generation. This replaces running `npm run dev` on
+# the host — Docker is the dev env and the production env, no parallel
+# tooling to keep in sync.
+#
+# A `docker-compose.prod.yml` lands in the next commit to do the inverse
+# (pre-built assets, no Vite container, no bind mounts).
+
+services:
+  vite:
+    image: node:20-bookworm-slim
+    container_name: squadup-vite
+    restart: unless-stopped
+    working_dir: /var/www/html
+    # `npm install` on first boot handles fresh clones that have no
+    # node_modules yet. After that it's a fast no-op and `vite` takes over.
+    command: >
+      sh -c "
+      if [ ! -d node_modules ] || [ ! -f node_modules/.package-lock.json ]; then
+        echo '[vite] installing npm dependencies...';
+        npm install --no-audit --no-fund;
+      fi;
+      npm run dev
+      "
+    ports:
+      - "5173:5173"    # Vite HTTP + HMR websocket
+    volumes:
+      - .:/var/www/html
+      # Named volume for node_modules so the container's install doesn't
+      # fight with whatever the host may have cached there. Swap to a
+      # bind mount only if you need to poke around in node_modules from
+      # the host.
+      - node-modules:/var/www/html/node_modules
+    environment:
+      # Wayfinder's vite plugin tries to run `php artisan` from this
+      # container, which has no PHP. The app container generates types in
+      # its entrypoint instead.
+      SKIP_WAYFINDER_AUTO: "1"
+    depends_on:
+      app:
+        condition: service_started
+    networks:
+      - squadup
+    healthcheck:
+      disable: true    # Vite doesn't ship a healthcheck endpoint.
+
+volumes:
+  node-modules:

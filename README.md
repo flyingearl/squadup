@@ -53,6 +53,7 @@ First build takes 5-10 minutes (PHP extensions compile from source). Afterwards,
 | App (via Traefik) | `8080` | Laravel welcome page / SPA — load-balanced across 2 replicas |
 | Traefik dashboard | `8081` | http://localhost:8081 — shows discovered services, replicas, healthchecks |
 | Reverb (websockets) | `8082` | Browser WebSocket endpoint for real-time features |
+| Vite dev server | `5173` | Runs in a container; HMR websocket for hot-reload |
 | Mailpit SMTP | `1025` | Laravel's mail connection target (dev) |
 | Mailpit web UI | `8025` | http://localhost:8025 — view outbound mail |
 | Postgres | `5432` | `squadup / squadup / squadup` (db / user / pass, dev only) |
@@ -64,10 +65,10 @@ Credentials live in `.env.example` — they're dev defaults, not secrets, and on
 
 ## Architecture
 
-Current state (end of Phase 0 commit 3):
+Current state (end of Phase 0 commit 4):
 
 ```
-   localhost:8080 ─▶ traefik ─▶ dashboard :8081
+   localhost:8080 ─▶ traefik ─▶ dashboard :8081                localhost:5173 ─▶ vite (HMR)
                          │
            ┌─────────────┴─────────────┐
            ▼                           ▼
@@ -79,10 +80,12 @@ Current state (end of Phase 0 commit 3):
     ┌─────┬──────────┼──────────┬──────────┬──────────┬───────────┐
     ▼     ▼          ▼          ▼          ▼          ▼           ▼
  ┌────┐ ┌────┐  ┌────────┐  ┌───────┐  ┌────────┐ ┌───────┐ ┌─────────┐
- │ pg │ │redis│ │ reverb │  │ minio │  │  queue │ │  sched│ │ mailpit │
+ │ pg │ │redis│ │ reverb │  │ minio │  │  queue │ │ sched │ │ mailpit │
  │    │ │     │ │  :8082 │  │:9000/1│  │ worker │ │ uler  │ │ :8025   │
  └────┘ └─────┘ └────────┘  └───────┘  └────────┘ └───────┘ └─────────┘
 ```
+
+The `vite` service is dev-only (defined in `docker-compose.override.yml`) and doesn't ship to production.
 
 Planned topology at end of Phase 0:
 
@@ -125,8 +128,17 @@ Planned topology at end of Phase 0:
 | `minio` | `minio/minio:latest` | S3-compatible object storage. `s3` filesystem driver connects via `AWS_ENDPOINT=http://minio:9000`. |
 | `minio-init` | `minio/mc:latest` | One-shot: waits for MinIO, creates the `squadup` bucket, sets a download policy. Exits after running. |
 | `mailpit` | `axllent/mailpit:latest` | SMTP catcher. Laravel sends to `mailpit:1025`; view the inbox at http://localhost:8025. |
+| `vite` *(dev only)* | `node:20-bookworm-slim` | Runs `npm install` on first boot, then `npm run dev`. Provides Tailwind + Vue HMR and triggers Wayfinder type generation. Lives in `docker-compose.override.yml` so it doesn't ship to production. |
 
 All PHP-side services (app, reverb, queue-worker, scheduler) share the same built image. They differ only in the command that `supervisord`/`entrypoint` execs and the `CONTAINER_ROLE` env var (which tells the entrypoint whether to run migrations).
+
+### Why a `docker-compose.override.yml`?
+
+Compose automatically merges `docker-compose.override.yml` on top of the base file when you run `docker compose up`. This repo uses the split deliberately:
+
+- **`docker-compose.yml`** — the production-shaped stack. Shared between dev and CI.
+- **`docker-compose.override.yml`** — dev-only additions: the Vite container, bind mounts, anything that shouldn't ship.
+- **`docker-compose.prod.yml`** *(coming in commit 5)* — production-only settings: pre-built assets, read-only filesystems, no source bind mounts. Run with `docker compose -f docker-compose.yml -f docker-compose.prod.yml up`.
 
 ### Proving round-robin works
 
@@ -199,7 +211,7 @@ This is a phased build. Each phase has explicit exit criteria in the [brief](bri
 
 | Phase | Scope | Status |
 |---|---|---|
-| **0 — Foundation** | Docker Compose (app, Postgres, Redis, MinIO, Reverb, queue, scheduler, LB), GitHub Actions CI | In progress (commits 1-3 of ~6 done) |
+| **0 — Foundation** | Docker Compose (app, Postgres, Redis, MinIO, Reverb, queue, scheduler, LB, Vite), GitHub Actions CI | In progress (commits 1-4 of ~6 done) |
 | **1 — Core social** | Posts, follows, timeline, likes, replies, profiles, game catalog | Planned |
 | **2 — LFG differentiator** | LFG post schema, filterable LFG board, join-request flow | Planned |
 | **3 — DMs & real-time** | 1:1 and group DMs, Reverb-backed delivery, notifications, admin reports queue | Planned |
